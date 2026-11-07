@@ -91,12 +91,12 @@ function Install-Deps {
         Write-Warn "已使用 -SkipDeps, 跳过依赖安装"
         return
     }
-    Write-Step "步骤 2/4: 安装 Python 依赖 (requests / pypushdeer)"
-    & $pythonCmd -m pip install --quiet --disable-pip-version-check requests pypushdeer
+    Write-Step "步骤 2/4: 安装 Python 依赖 (requests / pypushdeer / serverchan-sdk)"
+    & $pythonCmd -m pip install --quiet --disable-pip-version-check requests pypushdeer serverchan-sdk
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "pip 安装失败, 尝试升级 pip 后重试..."
         & $pythonCmd -m pip install --quiet --disable-pip-version-check --upgrade pip
-        & $pythonCmd -m pip install --quiet --disable-pip-version-check requests pypushdeer
+        & $pythonCmd -m pip install --quiet --disable-pip-version-check requests pypushdeer serverchan-sdk
         if ($LASTEXITCODE -ne 0) { throw "依赖安装失败, 请检查网络后重试。" }
     }
     Write-Ok "依赖安装完成"
@@ -149,7 +149,7 @@ function Read-EnvFile {
 function Save-EnvFile {
     param([hashtable]$vars)
     # 按固定顺序写出, 便于人类阅读/复用
-    $order = @("GLADOS_COOKIES", "GLADOS_EXCHANGE_PLAN", "PUSHDEER_SENDKEY", "GLADOS_VERBOSE")
+    $order = @("GLADOS_COOKIES", "GLADOS_EXCHANGE_PLAN", "PUSHDEER_SENDKEY", "SERVERCHAN_SENDKEY", "GLADOS_VERBOSE")
     $lines = @(
         "# GLaDOS 本地配置 (由 run-local.ps1 生成, 已被 .gitignore 忽略, 请勿提交)",
         "# 修改后保存即可, 再次运行 .\run-local.ps1 自动生效",
@@ -158,8 +158,8 @@ function Save-EnvFile {
     )
     foreach ($k in $order) {
         $val = if ($vars.ContainsKey($k)) { [string]$vars[$k] } else { "" }
-        if ($k -eq "GLADOS_COOKIES" -and $val -ne "") {
-            # 多账号拆开各占一行, 便于阅读/编辑
+        # JSON 数组格式保持单行; 旧 & 分隔格式拆开各占一行, 便于阅读/编辑
+        if ($k -eq "GLADOS_COOKIES" -and $val -ne "" -and -not $val.StartsWith("[") -and -not $val.StartsWith("{")) {
             $lines += "$k="
             $val -split "&" | ForEach-Object { if ($_ -ne "") { $lines += $_ } }
         } else {
@@ -192,7 +192,7 @@ function Load-Or-Create-Env {
         Write-Host "首次运行: 请在下方粘贴 GLADOS_COOKIES。" -ForegroundColor Yellow
         Write-Host "获取方式: GLaDOS 签到页面 F12 -> Network -> 刷新 ->" -ForegroundColor Yellow
         Write-Host "         点第一个请求 -> Request Headers -> 复制 Cookie 的值。" -ForegroundColor Yellow
-        Write-Host "(多账号用 & 连接; 也可直接留空, 稍后手动编辑 .env)" -ForegroundColor Yellow
+        Write-Host "(推荐 JSON 数组, 单行; 旧 & 分隔格式仍兼容。也可直接留空, 稍后手动编辑 .env)" -ForegroundColor Yellow
         Write-Host ""
         $cookieInput = Read-Host -Prompt "粘贴 GLADOS_COOKIES (留空跳过)"
 
@@ -207,6 +207,9 @@ function Load-Or-Create-Env {
 
             $pushKey = Read-Host -Prompt "PUSHDEER_SENDKEY (留空=不推送)"
             if (-not [string]::IsNullOrWhiteSpace($pushKey)) { $vars["PUSHDEER_SENDKEY"] = $pushKey }
+
+            $scKey = Read-Host -Prompt "SERVERCHAN_SENDKEY (留空=不推送)"
+            if (-not [string]::IsNullOrWhiteSpace($scKey)) { $vars["SERVERCHAN_SENDKEY"] = $scKey }
 
             $verbose = Read-Host -Prompt "GLADOS_VERBOSE (true/false, 直接回车默认 false)"
             if (-not [string]::IsNullOrWhiteSpace($verbose)) { $vars["GLADOS_VERBOSE"] = $verbose }

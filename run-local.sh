@@ -116,12 +116,12 @@ install_deps() {
         write_warn "已跳过依赖安装 (--skip-deps)"
         return 0
     fi
-    write_step "步骤 2/4: 安装 Python 依赖 (requests / pypushdeer)"
-    if ! "$PYTHON_CMD" -m pip install --quiet --disable-pip-version-check requests pypushdeer; then
+    write_step "步骤 2/4: 安装 Python 依赖 (requests / pypushdeer / serverchan-sdk)"
+    if ! "$PYTHON_CMD" -m pip install --quiet --disable-pip-version-check requests pypushdeer serverchan-sdk; then
         write_warn "pip 安装失败, 尝试升级 pip 后重试..."
         "$PYTHON_CMD" -m pip install --quiet --disable-pip-version-check --upgrade pip
-        if ! "$PYTHON_CMD" -m pip install --quiet --disable-pip-version-check requests pypushdeer; then
-            write_err "依赖安装失败。请检查网络, 或手动执行: $PYTHON_CMD -m pip install requests pypushdeer"
+        if ! "$PYTHON_CMD" -m pip install --quiet --disable-pip-version-check requests pypushdeer serverchan-sdk; then
+            write_err "依赖安装失败。请检查网络, 或手动执行: $PYTHON_CMD -m pip install requests pypushdeer serverchan-sdk"
             return 1
         fi
     fi
@@ -167,7 +167,7 @@ read_env_file() {
 }
 
 save_env_file() {
-    local order=("GLADOS_COOKIES" "GLADOS_EXCHANGE_PLAN" "PUSHDEER_SENDKEY" "GLADOS_VERBOSE")
+    local order=("GLADOS_COOKIES" "GLADOS_EXCHANGE_PLAN" "PUSHDEER_SENDKEY" "SERVERCHAN_SENDKEY" "GLADOS_VERBOSE")
     local k v part
     {
         echo "# GLaDOS 本地配置 (由 run-local.sh 生成, 已被 .gitignore 忽略, 请勿提交)"
@@ -176,7 +176,8 @@ save_env_file() {
         echo ""
         for k in "${order[@]}"; do
             v="${ENV_VARS[$k]:-}"
-            if [ "$k" = "GLADOS_COOKIES" ] && [ -n "$v" ]; then
+            # JSON 数组格式保持单行, 不拆分; 旧 & 分隔格式每行一个 cookie
+            if [ "$k" = "GLADOS_COOKIES" ] && [ -n "$v" ] && [ "${v:0:1}" != "[" ] && [ "${v:0:1}" != "{" ]; then
                 echo "GLADOS_COOKIES="
                 local old_ifs="$IFS"
                 IFS='&'
@@ -214,10 +215,10 @@ load_or_create_env() {
             printf "${C_WARN}首次运行: 请在下方粘贴 GLADOS_COOKIES。${C_RESET}\n"
             printf "${C_WARN}获取方式: GLaDOS 签到页面 F12 -> Network -> 刷新 ->${C_RESET}\n"
             printf "${C_WARN}         点第一个请求 -> Request Headers -> 复制 Cookie 的值。${C_RESET}\n"
-            printf "${C_WARN}(多账号用 & 连接; 也可直接留空, 稍后手动编辑 .env)${C_RESET}\n"
+            printf "${C_WARN}(推荐 JSON 数组, 单行; 旧 & 分隔格式仍兼容。也可直接留空, 稍后手动编辑 .env)${C_RESET}\n"
             echo ""
 
-            local input ex pk verb
+            local input ex pk sc verb
             read -r -p "粘贴 GLADOS_COOKIES (留空跳过): " input
             input="${input#"${input%%[![:space:]]*}"}"
             input="${input%"${input##*[![:space:]]}"}"
@@ -230,6 +231,9 @@ load_or_create_env() {
 
                 read -r -p "PUSHDEER_SENDKEY (留空=不推送): " pk
                 [ -n "${pk:-}" ] && ENV_VARS["PUSHDEER_SENDKEY"]="$pk"
+
+                read -r -p "SERVERCHAN_SENDKEY (留空=不推送): " sc
+                [ -n "${sc:-}" ] && ENV_VARS["SERVERCHAN_SENDKEY"]="$sc"
 
                 read -r -p "GLADOS_VERBOSE (true/false, 直接回车默认 false): " verb
                 [ -n "${verb:-}" ] && ENV_VARS["GLADOS_VERBOSE"]="$verb"
