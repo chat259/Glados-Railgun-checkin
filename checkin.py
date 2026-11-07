@@ -1,4 +1,4 @@
-import functools
+﻿import functools
 import hashlib
 import json
 import logging
@@ -15,7 +15,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from logging_config import init_logger
+from logging_config import init_logger, display_width, pad_text
 
 # --------------------------------------------------------------------------- #
 # 常量与枚举
@@ -67,6 +67,92 @@ class LogEmoji:
     INFO = "ℹ️"
 
 
+class LogAscii:
+    """日志 ASCII 替代常量（用于不支持 Emoji 的终端，如 Windows PowerShell）"""
+
+    SUCCESS = "[OK]"
+    FAIL = "[X]"
+    REPEAT = "[~]"
+    CHECKIN = "[#]"
+    POINTS = "[$]"
+    EXCHANGE = "[+]"
+    START = ">>>"
+    END = "<<<"
+    COOKIE = "[C]"
+    DOMAIN = "[D]"
+    WARNING = "[!]"
+    ERROR = "[E]"
+    INFO = "[i]"
+
+def _detect_emoji_support() -> bool:
+    """检测当前终端是否支持 Emoji 显示。
+
+    Windows PowerShell / cmd 对 Emoji 渲染不佳（重影、宽度错乱），默认关闭；
+    其他平台（Linux/macOS、GitHub Actions）默认开启。
+    可通过环境变量 GLADOS_EMOJI=true/false 强制覆盖。
+    """
+    import os
+    import sys
+    force = os.environ.get("GLADOS_EMOJI", "").strip().lower()
+    if force in ("true", "1", "yes", "on"):
+        return True
+    if force in ("false", "0", "no", "off"):
+        return False
+    return sys.platform != "win32"
+
+
+"""是否使用 Emoji（运行时可通过 set_emoji_mode 切换）"""
+USE_EMOJI = _detect_emoji_support()
+
+
+def set_emoji_mode(enabled: bool) -> None:
+    """运行时切换 Emoji / ASCII 模式"""
+    global USE_EMOJI
+    USE_EMOJI = enabled
+    import logging_config
+    logging_config.ENABLE_EMOJI = enabled
+
+
+class Log:
+    """统一日志符号接口：根据 USE_EMOJI 动态返回 Emoji 或 ASCII"""
+
+    @staticmethod
+    def _pick(emoji_val: str, ascii_val: str) -> str:
+        return emoji_val if USE_EMOJI else ascii_val
+
+    @property
+    def SUCCESS(self): return self._pick(LogEmoji.SUCCESS, LogAscii.SUCCESS)
+    @property
+    def FAIL(self): return self._pick(LogEmoji.FAIL, LogAscii.FAIL)
+    @property
+    def REPEAT(self): return self._pick(LogEmoji.REPEAT, LogAscii.REPEAT)
+    @property
+    def CHECKIN(self): return self._pick(LogEmoji.CHECKIN, LogAscii.CHECKIN)
+    @property
+    def POINTS(self): return self._pick(LogEmoji.POINTS, LogAscii.POINTS)
+    @property
+    def EXCHANGE(self): return self._pick(LogEmoji.EXCHANGE, LogAscii.EXCHANGE)
+    @property
+    def START(self): return self._pick(LogEmoji.START, LogAscii.START)
+    @property
+    def END(self): return self._pick(LogEmoji.END, LogAscii.END)
+    @property
+    def COOKIE(self): return self._pick(LogEmoji.COOKIE, LogAscii.COOKIE)
+    @property
+    def DOMAIN(self): return self._pick(LogEmoji.DOMAIN, LogAscii.DOMAIN)
+    @property
+    def WARNING(self): return self._pick(LogEmoji.WARNING, LogAscii.WARNING)
+    @property
+    def ERROR(self): return self._pick(LogEmoji.ERROR, LogAscii.ERROR)
+    @property
+    def INFO(self): return self._pick(LogEmoji.INFO, LogAscii.INFO)
+
+
+"""全局日志符号实例"""
+LOG = Log()
+
+
+
 class ProbeResult(Enum):
     """单域名探测结果"""
 
@@ -75,11 +161,11 @@ class ProbeResult(Enum):
     REJECTED = "rejected"  # 有响应但被拒，重试无意义
 
 
-"""签到状态 → (emoji, 文案)"""
+"""签到状态 → (emoji, 文案)。使用 LOG 动态选择 Emoji/ASCII"""
 STATUS_META = {
-    CheckinStatus.SUCCESS: (LogEmoji.SUCCESS, "签到成功"),
-    CheckinStatus.REPEAT: (LogEmoji.REPEAT, "重复签到"),
-    CheckinStatus.FAILURE: (LogEmoji.ERROR, "签到失败"),
+    CheckinStatus.SUCCESS: (LOG.SUCCESS, "签到成功"),
+    CheckinStatus.REPEAT: (LOG.REPEAT, "重复签到"),
+    CheckinStatus.FAILURE: (LOG.ERROR, "签到失败"),
 }
 
 
@@ -222,13 +308,21 @@ def log_line(label: str, domain: str, emoji: str, message: str, enabled: bool = 
 
     日志级别跟随 emoji：ERROR→error，WARNING/FAIL→warning，其余→info，
     避免「错误内容却是 [I] 级别」这种级别与语义脱节。
+    
+    对齐策略：
+    - label 字段固定 20 个显示宽度（中文/Emoji 算 2 列，不足右侧填充空格）
+    - domain 字段固定 16 个显示宽度
+    - 确保长账号名、长域名下日志依然对齐
     """
     if not enabled:
         return
-    line = f"{LogEmoji.COOKIE}[{label}] {LogEmoji.DOMAIN}[{domain}] {emoji} {message}"
-    if emoji == LogEmoji.ERROR:
+    # 按显示宽度对齐：label 20 列，domain 16 列
+    aligned_label = pad_text(f"[{label}]", 20)
+    aligned_domain = pad_text(f"[{domain}]", 16)
+    line = f"{LOG.COOKIE}{aligned_label} {LOG.DOMAIN}{aligned_domain} {emoji} {message}"
+    if emoji == LOG.ERROR:
         logger.error(line)
-    elif emoji in (LogEmoji.WARNING, LogEmoji.FAIL):
+    elif emoji in (LOG.WARNING, LOG.FAIL):
         logger.warning(line)
     else:
         logger.info(line)
@@ -247,7 +341,7 @@ def safe_call(default: Any):
                 return func(self, *args, **kwargs)
             except Exception as e:  # noqa: BLE001 - 兜底，避免单个请求失败中断流程
                 # log_line 会按 ERROR emoji 使用 error 级别，不受 verbose 影响
-                log_line(self.label, self.domain, LogEmoji.ERROR, f"{func.__name__} 执行失败: {e}")
+                log_line(self.label, self.domain, LOG.ERROR, f"{func.__name__} 执行失败: {e}")
                 return default(e) if callable(default) else default
 
         return wrapper
@@ -361,7 +455,7 @@ class CookieEntry:
             self.result = CheckinResult(domain=domain, days=days)
             self.result.email = email
             self.result.note = "运行超时，已跳过签到"
-            self.log(domain, LogEmoji.WARNING, "运行超出预算，跳过签到", force=True)
+            self.log(domain, LOG.WARNING, "运行超出预算，跳过签到", force=True)
             self._log_result()
             return self.result
 
@@ -373,7 +467,7 @@ class CookieEntry:
 
     def _sign_in(self, api: "API", domain: str, days: Optional[int], email: str, config: "Config") -> CheckinResult:
         """签到 → 查积分 → 可选兑换"""
-        self.log(domain, LogEmoji.CHECKIN, "执行签到")
+        self.log(domain, LOG.CHECKIN, "执行签到")
         result = api.checkin()
         result.domain = domain
         result.days = days
@@ -383,27 +477,27 @@ class CookieEntry:
         if days == 0:
             result.reopened = self._try_reopen(api, domain, result)
 
-        self.log(domain, LogEmoji.POINTS, "查询总积分")
+        self.log(domain, LOG.POINTS, "查询总积分")
         result.points_total = api.get_points()
 
         # 签到没成功就去兑换，只会白花积分或再吃一次拒绝，故仅成功/重复时兑换
         if result.code in (CheckinStatus.SUCCESS, CheckinStatus.REPEAT):
             result.exchange = self._apply_exchange(api, config, domain)
         else:
-            self.log(domain, LogEmoji.INFO, "签到未成功，跳过自动兑换")
+            self.log(domain, LOG.INFO, "签到未成功，跳过自动兑换")
 
         result.note = self._expiry_note(result.days)
         return result
 
     def _try_reopen(self, api: "API", domain: str, result: CheckinResult) -> bool:
         """剩余天数为 0 时尝试重置订阅；成功后刷新剩余天数为最新值。"""
-        self.log(domain, LogEmoji.WARNING, "剩余天数为 0，尝试重置订阅", force=True)
+        self.log(domain, LOG.WARNING, "剩余天数为 0，尝试重置订阅", force=True)
         code = api.reopen()
         if code is None or code != 0:
-            self.log(domain, LogEmoji.WARNING, "重置订阅失败，保持原剩余天数", force=True)
+            self.log(domain, LOG.WARNING, "重置订阅失败，保持原剩余天数", force=True)
             return False
 
-        self.log(domain, LogEmoji.SUCCESS, "重置订阅成功，刷新剩余天数", force=True)
+        self.log(domain, LOG.SUCCESS, "重置订阅成功，刷新剩余天数", force=True)
         refreshed = api.fetch_status()
         if refreshed is not None:
             new_days = left_days(refreshed)
@@ -416,10 +510,10 @@ class CookieEntry:
         """按配置执行兑换；未配置时返回空串（配置状态不进推送正文）"""
         required = config.exchange_plans.get(config.exchange_plan)
         if required is None:
-            self.log(domain, LogEmoji.INFO, "未配置兑换计划，跳过自动兑换")
+            self.log(domain, LOG.INFO, "未配置兑换计划，跳过自动兑换")
             return ""
 
-        self.log(domain, LogEmoji.EXCHANGE, f"开始兑换 {config.exchange_plan} (需要 {required} 积分)")
+        self.log(domain, LOG.EXCHANGE, f"开始兑换 {config.exchange_plan} (需要 {required} 积分)")
         return api.exchange(config.exchange_plan)
 
     @staticmethod
@@ -436,7 +530,7 @@ class CookieEntry:
     def _log_result(self) -> None:
         """输出单账号结论：成功 ✅、重复 🔄、失败 ⚠️"""
         r = self.result
-        status = STATUS_META.get(r.code, (LogEmoji.ERROR, "签到失败"))[1]
+        status = STATUS_META.get(r.code, (LOG.ERROR, "签到失败"))[1]
         parts = [f"结果: {status}"]
         if r.email:
             parts.append(f"邮箱 {r.email}")
@@ -447,11 +541,11 @@ class CookieEntry:
         if r.reopened:
             parts.append("已重置订阅")
         if r.code is CheckinStatus.SUCCESS:
-            emoji = LogEmoji.SUCCESS
+            emoji = LOG.SUCCESS
         elif r.code is CheckinStatus.REPEAT:
-            emoji = LogEmoji.REPEAT
+            emoji = LOG.REPEAT
         else:
-            emoji = LogEmoji.WARNING
+            emoji = LOG.WARNING
         self.log(r.domain, emoji, ", ".join(parts), force=True)
 
     # ---------------- 域名探测 ----------------
@@ -468,13 +562,13 @@ class CookieEntry:
             with API(domain, self.cookie, label=self.label, verbose=config.verbose, probing=probing, user_agent=self.user_agent) as api:
                 data = api.fetch_status()
         except Exception as e:  # noqa: BLE001 - 单域名失败不应影响其他域名
-            logger.warning(f"{LogEmoji.WARNING} 探测 {domain} 时发生异常，按网络错误处理: {e}")
+            logger.warning(f"{LOG.WARNING} 探测 {domain} 时发生异常，按网络错误处理: {e}")
             return ProbeResult.NETWORK, None, None, ""
 
         if data is None:
             return ProbeResult.NETWORK, None, None, ""
         if not isinstance(data, dict):
-            logger.warning(f"{LogEmoji.WARNING} 探测 {domain} 返回非对象响应（{type(data).__name__}），按被拒处理")
+            logger.warning(f"{LOG.WARNING} 探测 {domain} 返回非对象响应（{type(data).__name__}），按被拒处理")
             return ProbeResult.REJECTED, None, -2, ""
 
         code = data.get("code", -2)
@@ -493,11 +587,11 @@ class CookieEntry:
 
         for domain in self._candidates(config):
             if budget is not None and budget.expired():
-                self.log(self.origin or UNPROBED, LogEmoji.WARNING, "运行超出预算，停止探测剩余域名", force=True)
+                self.log(self.origin or UNPROBED, LOG.WARNING, "运行超出预算，停止探测剩余域名", force=True)
                 break
             kind, days, code, email = self._probe(domain, True, config)
             if kind is ProbeResult.HIT:
-                self.log(domain, LogEmoji.SUCCESS, f"命中登录域名（剩余 {format_days(days)}）", force=True)
+                self.log(domain, LOG.SUCCESS, f"命中登录域名（剩余 {format_days(days)}）", force=True)
                 return domain, days, email
             if kind is ProbeResult.NETWORK:
                 network.append(domain)
@@ -507,17 +601,17 @@ class CookieEntry:
         if network:
             self.log(
                 self.origin or UNPROBED,
-                LogEmoji.WARNING,
+                LOG.WARNING,
                 f"以下域名首轮无响应，用长超时重试一次：{'、'.join(network)}",
                 force=True,
             )
             for domain in list(network):
                 if budget is not None and budget.expired():
-                    self.log(self.origin or UNPROBED, LogEmoji.WARNING, "运行超出预算，停止重试剩余域名", force=True)
+                    self.log(self.origin or UNPROBED, LOG.WARNING, "运行超出预算，停止重试剩余域名", force=True)
                     break
                 kind, days, code, email = self._probe(domain, False, config)
                 if kind is ProbeResult.HIT:
-                    self.log(domain, LogEmoji.SUCCESS, f"重试后命中登录域名（剩余 {format_days(days)}）", force=True)
+                    self.log(domain, LOG.SUCCESS, f"重试后命中登录域名（剩余 {format_days(days)}）", force=True)
                     return domain, days, email
                 if kind is ProbeResult.REJECTED:
                     network.remove(domain)
@@ -536,21 +630,21 @@ class CookieEntry:
         if rejected and not network:
             self.log(
                 domain,
-                LogEmoji.ERROR,
+                LOG.ERROR,
                 f"候选域名均返回「没有权限」：{'、'.join(rejected)}。" f"可能已在别处退出登录 / 改密导致 Cookie 失效，或账号属于未列入候选的域名" f"——请重新登录后更新 Cookie",
                 force=True,
             )
         elif network and not rejected:
             self.log(
                 domain,
-                LogEmoji.ERROR,
+                LOG.ERROR,
                 f"候选域名均未获得服务端响应（{'、'.join(network)}）：网络或服务端故障，非 Cookie 问题，建议稍后重跑",
                 force=True,
             )
         else:
             self.log(
                 domain,
-                LogEmoji.ERROR,
+                LOG.ERROR,
                 f"探测失败：网络无响应 {'、'.join(network) or '无'}；返回无权限 {'、'.join(rejected) or '无'}",
                 force=True,
             )
@@ -620,14 +714,14 @@ class Accounts:
             if "\n" in part:
                 raise ValueError("换行分隔格式已不支持，请改用 JSON 数组或 & 分隔")
             if not CookieEntry.has_session_field(part):
-                logger.warning(f"{LogEmoji.WARNING} 第 {position} 段缺少 koa:sess / gld:sess，已跳过")
+                logger.warning(f"{LOG.WARNING} 第 {position} 段缺少 koa:sess / gld:sess，已跳过")
                 continue
             items.append(("", "", part, ""))
 
         if not items:
             raise ValueError("未解析到任何有效账号")
 
-        logger.warning(f"{LogEmoji.WARNING} 检测到旧版 & 分隔格式，建议尽快更新为固定 JSON 格式（见 README）")
+        logger.warning(f"{LOG.WARNING} 检测到旧版 & 分隔格式，建议尽快更新为固定 JSON 格式（见 README）")
         return cls(cls._dedupe(items, verbose))
 
     @classmethod
@@ -660,7 +754,7 @@ class Accounts:
         seen: Dict[str, str] = {}
         for name, origin, cookie, user_agent in items:
             if cookie in seen:
-                logger.warning(f"{LogEmoji.WARNING} 检测到重复的 Cookie（与 {seen[cookie]} 相同），已跳过（name={name or '未命名'}）")
+                logger.warning(f"{LOG.WARNING} 检测到重复的 Cookie（与 {seen[cookie]} 相同），已跳过（name={name or '未命名'}）")
                 continue
             entry = CookieEntry.build(len(entries) + 1, cookie, name, origin, user_agent, verbose)
             seen[cookie] = entry.label
@@ -689,21 +783,21 @@ def log_reject(code: int, raw: Dict, message: str, domain: str, log: Callable[..
         device = raw.get("loginDevice") or "未知"
         if raw.get("reason") == "device-mismatch":
             if device in PLATFORM_UA:
-                log(LogEmoji.ERROR, f"设备平台不匹配(loginDevice={device})，重试后仍失败，请确认登录设备平台", True)
+                log(LOG.ERROR, f"设备平台不匹配(loginDevice={device})，重试后仍失败，请确认登录设备平台", True)
             else:
-                log(LogEmoji.ERROR, f"设备平台不匹配(loginDevice={device} 不在支持列表)，无法自动切换 UA", True)
+                log(LOG.ERROR, f"设备平台不匹配(loginDevice={device} 不在支持列表)，无法自动切换 UA", True)
         else:
-            log(LogEmoji.ERROR, f"服务端拒绝签到(code=4, reason={raw.get('reason')})，请检查账户风控状态", True)
+            log(LOG.ERROR, f"服务端拒绝签到(code=4, reason={raw.get('reason')})，请检查账户风控状态", True)
         if ua_hint:
-            log(LogEmoji.INFO, f"建议：{ua_hint}", True)
+            log(LOG.INFO, f"建议：{ua_hint}", True)
     elif code == -2:
         log(
-            LogEmoji.ERROR,
+            LOG.ERROR,
             f"无权限(code=-2)：Cookie 可能已失效，请重新登录 {domain} 刷新 Cookie 并更新仓库 Secret GLADOS_COOKIES",
             True,
         )
     else:
-        log(LogEmoji.ERROR, f"未预期响应(code={code}, message={message})，请检查 GLaDOS 服务状态或 Cookie", True)
+        log(LOG.ERROR, f"未预期响应(code={code}, message={message})，请检查 GLaDOS 服务状态或 Cookie", True)
 
 
 def parse_checkin(raw: Optional[Dict], domain: str, log: Callable[..., None], ua_hint: str = "") -> CheckinResult:
@@ -711,7 +805,7 @@ def parse_checkin(raw: Optional[Dict], domain: str, log: Callable[..., None], ua
     result = CheckinResult(domain=domain)
     if not isinstance(raw, dict):
         if raw is not None:
-            log(LogEmoji.ERROR, f"签到响应格式异常（{type(raw).__name__}）", True)
+            log(LOG.ERROR, f"签到响应格式异常（{type(raw).__name__}）", True)
         return result
 
     code = raw.get("code", -2)
@@ -721,15 +815,15 @@ def parse_checkin(raw: Optional[Dict], domain: str, log: Callable[..., None], ua
     # token 与域名不一致时服务端返回 "please checkin via https://..."，此响应 code 可能为 0，
     # 必须优先拦截，否则会被误判为签到成功。
     if "please checkin via" in message.lower():
-        log(LogEmoji.ERROR, f"签到被拒：{message}（服务端认定签到域名不符）", True)
+        log(LOG.ERROR, f"签到被拒：{message}（服务端认定签到域名不符）", True)
         return result
 
     if code == CheckinStatus.SUCCESS.value:
-        log(LogEmoji.SUCCESS, f"{{ code : {code}, points : {points}, message : {message} }}")
+        log(LOG.SUCCESS, f"{{ code : {code}, points : {points}, message : {message} }}")
         result.points = points
         result.code = CheckinStatus.SUCCESS
     elif code == CheckinStatus.REPEAT.value:
-        log(LogEmoji.REPEAT, f"{{ code : {code}, message : {message} }}", True)
+        log(LOG.REPEAT, f"{{ code : {code}, message : {message} }}", True)
         result.code = CheckinStatus.REPEAT
     else:
         log_reject(code, raw, message, domain, log, ua_hint)
@@ -806,7 +900,7 @@ class API:
             try:
                 session.close()
             except Exception as e:  # noqa: BLE001 - 关闭失败无需影响主流程
-                logger.error(f"{LogEmoji.ERROR} 关闭 session 时发生错误: {e}")
+                logger.error(f"{LOG.ERROR} 关闭 session 时发生错误: {e}")
 
     # ---------------- 对外接口 ----------------
 
@@ -829,7 +923,7 @@ class API:
             else:
                 recover_ua = PLATFORM_UA.get(device)
                 if recover_ua:
-                    self.log(LogEmoji.WARNING, f"设备平台不匹配 (loginDevice={device})，切换 UA 重试", force=True)
+                    self.log(LOG.WARNING, f"设备平台不匹配 (loginDevice={device})，切换 UA 重试", force=True)
                     raw = self._checkin_attempt(recover_ua)
                 if self._is_device_mismatch(raw):
                     hint = "自动切换 UA 后仍不匹配；请在账号 JSON 中补充 `user-agent` 字段，填入提取 Cookie 时浏览器的 User-Agent"
@@ -845,7 +939,7 @@ class API:
         try:
             return response.json()
         except ValueError:
-            self.log(LogEmoji.ERROR, "状态响应解析失败", force=True)
+            self.log(LOG.ERROR, "状态响应解析失败", force=True)
             return None
 
     def _json_dict(self, response: requests.Response, what: str) -> Optional[Dict]:
@@ -853,10 +947,10 @@ class API:
         try:
             data = response.json()
         except ValueError:
-            self.log(LogEmoji.ERROR, f"{what}响应解析失败（非 JSON）", force=True)
+            self.log(LOG.ERROR, f"{what}响应解析失败（非 JSON）", force=True)
             return None
         if not isinstance(data, dict):
-            self.log(LogEmoji.ERROR, f"{what}响应格式异常", force=True)
+            self.log(LOG.ERROR, f"{what}响应格式异常", force=True)
             return None
         return data
 
@@ -873,10 +967,10 @@ class API:
 
         points = to_int(data.get("points"))
         if points is None:
-            self.log(LogEmoji.ERROR, f"积分字段无法解析: {data.get('points')!r}", force=True)
+            self.log(LOG.ERROR, f"积分字段无法解析: {data.get('points')!r}", force=True)
             return None
 
-        self.log(LogEmoji.SUCCESS, f"{{ code : {data.get('code', -2)}, points : {points} 积分}}")
+        self.log(LOG.SUCCESS, f"{{ code : {data.get('code', -2)}, points : {points} 积分}}")
         return points
 
     @safe_call(default="兑换未完成，请到站点确认")
@@ -885,7 +979,7 @@ class API:
         # 兑换会消耗积分，重试可能重复扣分，故禁用重试
         response = self.request("POST", APIEndpoint.EXCHANGE, data={"planType": plan}, retry=False)
         if response is None:
-            self.log(LogEmoji.WARNING, "兑换未完成（网络异常或状态码非 2xx），请到站点确认", force=True)
+            self.log(LOG.WARNING, "兑换未完成（网络异常或状态码非 2xx），请到站点确认", force=True)
             return "兑换未完成，请到站点确认"
 
         data = self._json_dict(response, "兑换")
@@ -894,10 +988,10 @@ class API:
 
         code, message = data.get("code", -2), data.get("message", "未知错误")
         if code == 0:
-            self.log(LogEmoji.SUCCESS, f"{{ code : {code}, message : {message} }}")
+            self.log(LOG.SUCCESS, f"{{ code : {code}, message : {message} }}")
             return f"兑换成功: {plan}"
 
-        self.log(LogEmoji.FAIL, f"{{ code : {code}, message : {message} }}", force=True)
+        self.log(LOG.FAIL, f"{{ code : {code}, message : {message} }}", force=True)
         return f"兑换失败: {message}"
 
     @safe_call(default=None)
@@ -906,7 +1000,7 @@ class API:
         # 重置会改变订阅状态，重试可能重复执行，故禁用重试
         response = self.request("POST", APIEndpoint.REOPEN, retry=False)
         if response is None:
-            self.log(LogEmoji.WARNING, "重置订阅未完成（网络异常或状态码非 2xx）", force=True)
+            self.log(LOG.WARNING, "重置订阅未完成（网络异常或状态码非 2xx）", force=True)
             return None
 
         data = self._json_dict(response, "重置订阅")
@@ -915,10 +1009,10 @@ class API:
 
         code, message = data.get("code", -2), data.get("message", "未知错误")
         if code == 0:
-            self.log(LogEmoji.SUCCESS, f"{{ code : {code}, message : {message} }}")
+            self.log(LOG.SUCCESS, f"{{ code : {code}, message : {message} }}")
             return code
 
-        self.log(LogEmoji.FAIL, f"{{ code : {code}, message : {message} }}", force=True)
+        self.log(LOG.FAIL, f"{{ code : {code}, message : {message} }}", force=True)
         return code
 
     def log(self, emoji: str, message: str, force: bool = False) -> None:
@@ -952,10 +1046,10 @@ class API:
             elif method.upper() == "GET":
                 response = session.get(url, headers=headers, timeout=timeout or self.timeout)
             else:
-                self.log(LogEmoji.ERROR, f"不支持的 HTTP 方法: {method}", force=True)
+                self.log(LOG.ERROR, f"不支持的 HTTP 方法: {method}", force=True)
                 return None
         except requests.exceptions.RequestException as e:
-            self.log(LogEmoji.ERROR, f"向 {url} 发起请求时发生网络错误: {e}", force=True)
+            self.log(LOG.ERROR, f"向 {url} 发起请求时发生网络错误: {e}", force=True)
             return None
 
         if not response.ok:
@@ -968,7 +1062,7 @@ class API:
         status = response.status_code
         if status >= 500:
             self.log(
-                LogEmoji.WARNING,
+                LOG.WARNING,
                 f"向 {url} 请求失败，状态码 {status}（服务端错误，非 Cookie/客户端问题，多为临时抖动，重试后仍失败）",
                 force=True,
             )
@@ -977,7 +1071,7 @@ class API:
         body = response.text or ""
         is_html = "html" in response.headers.get("Content-Type", "").lower() or body.lstrip()[:1] == "<"
         snippet = "（HTML 响应，已省略）" if is_html else body[:300] + ("..." if len(body) > 300 else "")
-        self.log(LogEmoji.WARNING, f"向 {url} 请求失败，状态码 {status}。响应: {snippet}", force=True)
+        self.log(LOG.WARNING, f"向 {url} 请求失败，状态码 {status}。响应: {snippet}", force=True)
 
     def _checkin_challenge(self, user_agent: str) -> Optional[Tuple[str, str]]:
         """获取签到 challenge 并计算 proof；失败返回 None，由调用方回退旧协议。"""
@@ -987,21 +1081,21 @@ class API:
         try:
             data = response.json()
         except ValueError:
-            self.log(LogEmoji.WARNING, "签到 challenge 响应解析失败，按旧协议提交", force=True)
+            self.log(LOG.WARNING, "签到 challenge 响应解析失败，按旧协议提交", force=True)
             return None
         if not isinstance(data, dict) or data.get("code") != 0:
-            self.log(LogEmoji.WARNING, f"签到 challenge 响应异常: {data}", force=True)
+            self.log(LOG.WARNING, f"签到 challenge 响应异常: {data}", force=True)
             return None
 
         nonce = data.get("nonce")
         if not nonce:
-            self.log(LogEmoji.WARNING, "签到 challenge 缺少 nonce，按旧协议提交", force=True)
+            self.log(LOG.WARNING, "签到 challenge 缺少 nonce，按旧协议提交", force=True)
             return None
 
         # challenge 到手后等待间隔后再提交
         time.sleep(CHALLENGE_DELAY_SECONDS)
         proof = hashlib.sha256(f"{nonce}.{CHALLENGE_SUFFIX}".encode()).hexdigest()
-        self.log(LogEmoji.INFO, "已获取签到 challenge")
+        self.log(LOG.INFO, "已获取签到 challenge")
         return str(nonce), proof
 
     def _checkin_attempt(self, user_agent: str) -> Optional[Dict]:
@@ -1013,7 +1107,7 @@ class API:
             payload.update({"nonce": nonce, "proof": proof})
         else:
             self.log(
-                LogEmoji.WARNING,
+                LOG.WARNING,
                 "未取得签到 challenge，按旧协议提交（可能只获得 1 积分）",
                 force=True,
             )
@@ -1030,7 +1124,7 @@ class API:
         try:
             return response.json()
         except ValueError:
-            self.log(LogEmoji.ERROR, "签到响应解析失败", force=True)
+            self.log(LOG.ERROR, "签到响应解析失败", force=True)
             return None
 
 
@@ -1078,12 +1172,12 @@ class Config:
         self._load_accounts()
         self._load_exchange_plan()
 
-        logger.info(f"{LogEmoji.INFO} 共加载了 {len(self.accounts)} 个账号用于签到。")
+        logger.info(f"{LOG.INFO} 共加载了 {len(self.accounts)} 个账号用于签到。")
         for account in self.accounts:
-            logger.info(f"{LogEmoji.INFO} {LogEmoji.COOKIE}[{account.label}] {LogEmoji.DOMAIN}[{account.origin or '待探测'}] UA={'自定义' if account.user_agent else '默认'}")
-        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if self.push_key else '未设置'}，" f"{self.ENV_SERVERCHAN_KEY} {'已设置' if self.serverchan_key else '未设置'}。")
-        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
-        logger.info(f"{LogEmoji.INFO} 当前 {self.ENV_VERBOSE}: {self.verbose}。")
+            logger.info(f"{LOG.INFO} {LOG.COOKIE}[{account.label}] {LOG.DOMAIN}[{account.origin or '待探测'}] UA={'自定义' if account.user_agent else '默认'}")
+        logger.info(f"{LOG.INFO} 当前 {self.ENV_PUSH_KEY} {'已设置' if self.push_key else '未设置'}，" f"{self.ENV_SERVERCHAN_KEY} {'已设置' if self.serverchan_key else '未设置'}。")
+        logger.info(f"{LOG.INFO} 当前 {self.ENV_EXCHANGE_PLAN}: {self.exchange_plan}。")
+        logger.info(f"{LOG.INFO} 当前 {self.ENV_VERBOSE}: {self.verbose}。")
 
     def _get(self, key: str) -> str:
         return (self.env.get(key) or "").strip()
@@ -1093,12 +1187,12 @@ class Config:
             value = self._get(env_name)
             setattr(self, key, value)
             if not value:
-                logger.warning(f"{LogEmoji.WARNING} 环境变量 '{env_name}' 未设置。")
+                logger.warning(f"{LOG.WARNING} 环境变量 '{env_name}' 未设置。")
 
     def _load_accounts(self) -> None:
         raw = self._get(self.ENV_COOKIES)
         if not raw:
-            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_COOKIES}' 未设置。")
+            logger.warning(f"{LOG.WARNING} 环境变量 '{self.ENV_COOKIES}' 未设置。")
             self.load_error = f"环境变量 {self.ENV_COOKIES} 未设置"
             return
 
@@ -1106,19 +1200,19 @@ class Config:
         try:
             self.accounts = Accounts.parse(raw, self.verbose)
         except ValueError as e:
-            logger.error(f"{LogEmoji.ERROR} Cookie 解析失败：{e}")
+            logger.error(f"{LOG.ERROR} Cookie 解析失败：{e}")
             self.load_error = f"Cookie 解析失败：{e}"
 
     def _load_exchange_plan(self) -> None:
         value = self._get(self.ENV_EXCHANGE_PLAN)
         if not value:
-            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 未设置，将使用默认设置（不自动兑换）。")
+            logger.warning(f"{LOG.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 未设置，将使用默认设置（不自动兑换）。")
             return
         if value in EXCHANGE_PLANS:
             self.exchange_plan = value
-            logger.info(f"{LogEmoji.SUCCESS} 使用指定的兑换计划: {self.exchange_plan}")
+            logger.info(f"{LOG.SUCCESS} 使用指定的兑换计划: {self.exchange_plan}")
         else:
-            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 的值 '{value}' 无效，将跳过自动兑换。")
+            logger.warning(f"{LOG.WARNING} 环境变量 '{self.ENV_EXCHANGE_PLAN}' 的值 '{value}' 无效，将跳过自动兑换。")
 
     def _load_verbose(self) -> None:
         value = self._get(self.ENV_VERBOSE).lower()
@@ -1129,7 +1223,7 @@ class Config:
         elif value in FALSY:
             self.verbose = False
         else:
-            logger.warning(f"{LogEmoji.WARNING} 环境变量 '{self.ENV_VERBOSE}' 的值 '{value}' 无效，将使用默认值 {self.DEFAULT_VERBOSE}。")
+            logger.warning(f"{LOG.WARNING} 环境变量 '{self.ENV_VERBOSE}' 的值 '{value}' 无效，将使用默认值 {self.DEFAULT_VERBOSE}。")
 
 
 # --------------------------------------------------------------------------- #
@@ -1167,11 +1261,26 @@ class Report:
         lines = []
         for entry in self.entries:
             r = entry.result
-            emoji, status = STATUS_META.get(r.code, (LogEmoji.ERROR, "签到失败"))
-            name_cell = f"{entry.name or '未命名'}  " if show_name else ""
-            email_cell = f"{r.email}  " if r.email else ""
+            emoji, status = STATUS_META.get(r.code, (LOG.ERROR, "签到失败"))
+            # 对齐策略：
+            # - 序号 4 列
+            # - 账号名 30 列（超长截断，确保状态列对齐）
+            # - 邮箱 20 列
+            # - 状态 14 列（"[OK] 签到成功" = 13 列）
+            # - 域名 16 列
+            idx_cell = pad_text(f"#{entry.index}", 4)
+            if show_name:
+                name_cell = pad_text(entry.name or "未命名", 30)
+            else:
+                name_cell = ""
+            if r.email:
+                email_cell = pad_text(r.email, 20)
+            else:
+                email_cell = ""
+            status_cell = pad_text(f"{emoji} {status}", 14)
+            domain_cell = pad_text(r.domain or "未探测", 16)
             line = (
-                f"#{entry.index}  {name_cell}{email_cell}{emoji} {status}  {r.domain}  "
+                f"{idx_cell}  {name_cell}{email_cell}{status_cell}  {domain_cell}  "
                 f"获得 {r.points} 积分 · 剩余 {format_days(r.days)} · 总 {format_points(r.points_total)}"
             )
             if r.exchange:
@@ -1212,16 +1321,16 @@ class PushDeerBackend(PushBackend):
         try:
             from pypushdeer import PushDeer
         except ImportError:
-            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: 未安装 pypushdeer，请先执行 pip install pypushdeer。")
+            logger.error(f"{LOG.ERROR} [{self.name}] 推送失败: 未安装 pypushdeer，请先执行 pip install pypushdeer。")
             return False
 
         try:
             ok = PushDeer(pushkey=self.push_key).send_text(report.title, desp=self._render(report))
             if not ok:
-                logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: 接口返回失败")
+                logger.error(f"{LOG.ERROR} [{self.name}] 推送失败: 接口返回失败")
             return bool(ok)
         except Exception as e:  # noqa: BLE001 - 推送失败不应影响主流程
-            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: {e}")
+            logger.error(f"{LOG.ERROR} [{self.name}] 推送失败: {e}")
             return False
 
 
@@ -1241,17 +1350,17 @@ class ServerChanBackend(PushBackend):
         try:
             from serverchan_sdk import sc_send
         except ImportError:
-            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: 未安装 serverchan_sdk，请先执行 pip install serverchan-sdk。")
+            logger.error(f"{LOG.ERROR} [{self.name}] 推送失败: 未安装 serverchan_sdk，请先执行 pip install serverchan-sdk。")
             return False
 
         try:
             resp = sc_send(sendkey=self.send_key, title=report.title, desp=self._render(report))
             if isinstance(resp, dict) and resp.get("code") == 0:
                 return True
-            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: 接口返回 {resp}")
+            logger.error(f"{LOG.ERROR} [{self.name}] 推送失败: 接口返回 {resp}")
             return False
         except Exception as e:  # noqa: BLE001 - 推送失败不应影响主流程
-            logger.error(f"{LogEmoji.ERROR} [{self.name}] 推送失败: {e}")
+            logger.error(f"{LOG.ERROR} [{self.name}] 推送失败: {e}")
             return False
 
 
@@ -1270,16 +1379,16 @@ class PushService:
     def send(self, report: Report) -> bool:
         """向所有已配置后端发送，任一成功即视为成功"""
         if not self.backends:
-            logger.warning(f"{LogEmoji.WARNING} 未配置推送密钥，跳过。")
+            logger.warning(f"{LOG.WARNING} 未配置推送密钥，跳过。")
             return False
 
         names = "、".join(b.name for b in self.backends)
-        logger.info(f"{LogEmoji.INFO} 已配置 {len(self.backends)} 个后端（{names}），开始发送")
+        logger.info(f"{LOG.INFO} 已配置 {len(self.backends)} 个后端（{names}），开始发送")
         results = [backend.send(report) for backend in self.backends]
         if any(results):
-            logger.info(f"{LogEmoji.SUCCESS} 发送完成：{sum(results)}/{len(results)} 个后端成功")
+            logger.info(f"{LOG.SUCCESS} 发送完成：{sum(results)}/{len(results)} 个后端成功")
             return True
-        logger.error(f"{LogEmoji.ERROR} 全部后端发送失败")
+        logger.error(f"{LOG.ERROR} 全部后端发送失败")
         return False
 
 
@@ -1297,22 +1406,22 @@ class CheckinRunner:
     def run(self, budget: Optional[RunBudget] = None) -> Report:
         accounts = self.config.accounts
         candidates = "、".join(self.config.domains)
-        logger.info(f"{LogEmoji.INFO} 共 {len(accounts)} 个账号，候选域名 {len(self.config.domains)} 个（{candidates}）")
+        logger.info(f"{LOG.INFO} 共 {len(accounts)} 个账号，候选域名 {len(self.config.domains)} 个（{candidates}）")
 
         budget = budget or RunBudget()
         for position, entry in enumerate(accounts, 1):
             if budget.expired():
                 entry.result = CheckinResult.failure(entry.origin or UNPROBED)
                 entry.result.note = "运行超时，已跳过"
-                entry.log(entry.origin or UNPROBED, LogEmoji.WARNING, "运行超出预算，跳过该账号", force=True)
+                entry.log(entry.origin or UNPROBED, LOG.WARNING, "运行超出预算，跳过该账号", force=True)
                 continue
-            logger.info(f"{LogEmoji.START} ========== 处理账号 {position}/{len(accounts)}：{entry.label} ==========")
+            logger.info(f"{LOG.START} ========== 处理账号 {position}/{len(accounts)}：{entry.label} ==========")
             try:
                 entry.checkin(self.config, budget)
             except Exception as e:  # noqa: BLE001 - 单个账号异常不应中断整轮
                 entry.result = CheckinResult.failure(entry.origin or UNPROBED)
                 entry.result.note = f"账号处理异常: {e}"
-                entry.log(entry.origin or UNPROBED, LogEmoji.ERROR, f"处理异常，已跳过: {e}", force=True)
+                entry.log(entry.origin or UNPROBED, LOG.ERROR, f"处理异常，已跳过: {e}", force=True)
 
         return Report(accounts)
 
@@ -1330,35 +1439,35 @@ def main() -> None:
     report = Report.failed("未知错误")
 
     try:
-        logger.info(f"{LogEmoji.START} 步骤 1: 加载配置")
+        logger.info(f"{LOG.START} 步骤 1: 加载配置")
         config = Config()
         report = Report.failed(config.load_error or "未找到有效 Cookie")
 
         if not config.accounts:
             # 配置错误（未填 Cookie / 格式非法）应让工作流变红，否则用户永远发现不了
-            logger.error(f"{LogEmoji.ERROR} {config.load_error or '未找到有效的 Cookie'}，退出程序。")
+            logger.error(f"{LOG.ERROR} {config.load_error or '未找到有效的 Cookie'}，退出程序。")
             exit_code = 1
         else:
-            logger.info(f"{LogEmoji.START} 步骤 2: 执行签到")
+            logger.info(f"{LOG.START} 步骤 2: 执行签到")
             report = CheckinRunner(config).run()
 
-            logger.info(f"{LogEmoji.START} 步骤 3: 生成报告")
-            logger.info(f"\n{LogEmoji.END} ========== 签到总结 ==========\n{report.title}\n{report.render()}")
+            logger.info(f"{LOG.START} 步骤 3: 生成报告")
+            logger.info(f"\n{LOG.END} ========== 签到总结 ==========\n{report.title}\n{report.render()}")
 
     except Exception as e:  # noqa: BLE001 - 顶层兜底，保证仍能推送错误摘要
-        logger.error(f"{LogEmoji.ERROR} 主程序执行过程中发生未预期的错误: {e}")
+        logger.error(f"{LOG.ERROR} 主程序执行过程中发生未预期的错误: {e}")
         # 保留已完成账号的结果，避免一个异常吞掉全部进度
         report = Report(config.accounts, error=str(e)) if config is not None and config.accounts else Report.failed(str(e))
         exit_code = 1
 
     # 推送放在 try 之外：即使配置解析失败，也要尽力把错误通知出去
-    logger.info(f"{LogEmoji.START} 步骤 4: 发送推送")
+    logger.info(f"{LOG.START} 步骤 4: 发送推送")
     try:
         PushService(config).send(report)
     except Exception as e:  # noqa: BLE001 - 推送异常不应改变退出码
-        logger.error(f"{LogEmoji.ERROR} 推送阶段发生异常: {e}")
+        logger.error(f"{LOG.ERROR} 推送阶段发生异常: {e}")
 
-    logger.info(f"{LogEmoji.END} 签到完成")
+    logger.info(f"{LOG.END} 签到完成")
     if exit_code:
         sys.exit(exit_code)
 
