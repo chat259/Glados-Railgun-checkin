@@ -182,7 +182,7 @@ EXPIRY_WARN_DAYS = 7
 POINTS_TIMEOUT = (10, 30)
 
 """单次运行总预算（秒）。到期后跳过剩余账号，避免 Actions 长时间挂起"""
-RUN_BUDGET_SECONDS = 300
+RUN_BUDGET_SECONDS = 900
 
 """签到 challenge 的 proof 后缀与最小等待（与网页端当前实现一致）"""
 CHALLENGE_SUFFIX = "glados-observe-v1"
@@ -206,9 +206,9 @@ _HOSTNAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*
 
 """候选域名（探测顺序）：命中登录状态即锁定并只在该域名签到。各站 Cookie 通常不互通。"""
 CANDIDATE_DOMAINS = [
+    "glados.network",
     "glados.cloud",
     "railgun.info",
-    "glados.network",
     "glados.rocks",
     "glados.one",
     "glados.space",

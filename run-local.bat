@@ -1,0 +1,1 @@
+powershell.exe E:\doc\glados\run-local.ps1
