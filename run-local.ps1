@@ -105,8 +105,9 @@ function Install-Deps {
 # ---------- 3. 加载 / 创建 .env ----------
 function Read-EnvFile {
     # 从 .env 文件构建 hashtable, 支持 KEY=VALUE 行, 忽略空行与 # 注释
-    # GLADOS_COOKIES 特殊: 允许 "GLADOS_COOKIES=" 后跟多行, 每行一个 cookie,
-    # 直到下一个 KEY= 行或注释/空行结束; 解析时自动用 & 拼接
+    # GLADOS_COOKIES 特殊: 允许 "GLADOS_COOKIES=" 后跟多行内容:
+    #   - JSON 数组 (首行以 [ 或 { 开头): 多行按换行拼接, 保留 JSON 结构
+    #   - 旧 & 分隔格式: 每行一个 cookie, 用 & 拼接 (向后兼容)
     $vars = @{}
     if (Test-Path $EnvPath) {
         $lines = Get-Content -Path $EnvPath -Encoding UTF8
@@ -131,16 +132,26 @@ function Read-EnvFile {
                 }
             }
             elseif ($inCookies) {
-                # 无 KEY= 前缀的行: 视为 GLADOS_COOKIES 的续行 (一行一个 cookie)
+                # 无 KEY= 前缀的行: 视为 GLADOS_COOKIES 的续行
                 $cookieLines.Add($line) | Out-Null
             }
         }
     }
-    # 统一: GLADOS_COOKIES 拼成 & 分隔的单个字符串
+    # 统一: GLADOS_COOKIES 拼成单个字符串 (JSON 用换行, 旧格式用 &)
     if ($vars.ContainsKey("GLADOS_COOKIES")) {
         $list = $vars["GLADOS_COOKIES"]
         if ($list -is [System.Collections.ArrayList] -or $list -is [array]) {
-            $vars["GLADOS_COOKIES"] = ($list | Where-Object { $_ -ne "" }) -join "&"
+            $parts = @($list | Where-Object { $_ -ne "" })
+            if ($parts.Count -eq 0) {
+                $vars["GLADOS_COOKIES"] = ""
+            } else {
+                $first = $parts[0].Trim()
+                if ($first.StartsWith("[") -or $first.StartsWith("{")) {
+                    $vars["GLADOS_COOKIES"] = ($parts -join "`n")
+                } else {
+                    $vars["GLADOS_COOKIES"] = ($parts -join "&")
+                }
+            }
         }
     }
     return $vars
@@ -153,13 +164,23 @@ function Save-EnvFile {
     $lines = @(
         "# GLaDOS 本地配置 (由 run-local.ps1 生成, 已被 .gitignore 忽略, 请勿提交)",
         "# 修改后保存即可, 再次运行 .\run-local.ps1 自动生效",
-        "# GLADOS_COOKIES 支持多行: 下一行起每行一个 cookie (或单行用 & 连接均可)",
+        "# GLADOS_COOKIES 支持 JSON 数组 (可多行缩进); 旧 & 分隔格式仍兼容",
         ""
     )
     foreach ($k in $order) {
         $val = if ($vars.ContainsKey($k)) { [string]$vars[$k] } else { "" }
-        # JSON 数组格式保持单行; 旧 & 分隔格式拆开各占一行, 便于阅读/编辑
-        if ($k -eq "GLADOS_COOKIES" -and $val -ne "" -and -not $val.StartsWith("[") -and -not $val.StartsWith("{")) {
+        if ($k -eq "GLADOS_COOKIES" -and $val -ne "" -and ($val.StartsWith("[") -or $val.StartsWith("{"))) {
+            # JSON: 美化为多行缩进, 便于阅读/编辑; 失败则原样单行
+            try {
+                $pretty = ($val | ConvertFrom-Json | ConvertTo-Json -Depth 50)
+                $jsonLines = $pretty -split "`r?`n"
+                $lines += "GLADOS_COOKIES=$($jsonLines[0])"
+                for ($i = 1; $i -lt $jsonLines.Count; $i++) { $lines += $jsonLines[$i] }
+            } catch {
+                $lines += "GLADOS_COOKIES=$val"
+            }
+        } elseif ($k -eq "GLADOS_COOKIES" -and $val -ne "") {
+            # 旧 & 分隔格式: 每行一个 cookie
             $lines += "$k="
             $val -split "&" | ForEach-Object { if ($_ -ne "") { $lines += $_ } }
         } else {

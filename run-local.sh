@@ -135,10 +135,11 @@ declare -A ENV_VARS=()
 read_env_file() {
     ENV_VARS=()
     [ -f "$ENV_FILE" ] || return 0
-    local in_cookies=0 cookie_parts="" raw line key val
+    local in_cookies=0 raw line key val
+    local cookie_lines=()
     while IFS= read -r raw || [ -n "$raw" ]; do
         line="${raw#"${raw%%[![:space:]]*}"}"
-        line="${line%"${line##*[![:space:]]}"}"
+        line="${line%"${line##*[![:space:]]*}"}"
         if [ -z "$line" ] || [ "${line:0:1}" = "#" ]; then
             continue
         fi
@@ -147,37 +148,58 @@ read_env_file() {
             val="${BASH_REMATCH[2]}"
             if [ "$key" = "GLADOS_COOKIES" ]; then
                 in_cookies=1
-                cookie_parts="$val"
+                cookie_lines=()
+                [ -n "$val" ] && cookie_lines+=("$val")
             else
                 in_cookies=0
                 ENV_VARS["$key"]="$val"
             fi
         elif [ "$in_cookies" -eq 1 ]; then
-            # 无 KEY= 前缀的行: 视为 GLADOS_COOKIES 的续行 (一行一个 cookie)
-            if [ -n "$cookie_parts" ]; then
-                cookie_parts="$cookie_parts&$line"
-            else
-                cookie_parts="$line"
-            fi
+            # 无 KEY= 前缀的行: 视为 GLADOS_COOKIES 的续行
+            cookie_lines+=("$line")
         fi
     done < "$ENV_FILE"
-    if [ -n "$cookie_parts" ]; then
-        ENV_VARS["GLADOS_COOKIES"]="$cookie_parts"
+    if [ "${#cookie_lines[@]}" -gt 0 ]; then
+        local first="${cookie_lines[0]}"
+        first="${first#"${first%%[![:space:]]*}"}"
+        local nl=$'\n' out=""
+        if [ "${first:0:1}" = "[" ] || [ "${first:0:1}" = "{" ]; then
+            # JSON: 用换行拼接 (各行缩进会被去掉, json.loads 不依赖缩进)
+            for line in "${cookie_lines[@]}"; do
+                out="${out:+$out$nl}$line"
+            done
+        else
+            # 旧 & 分隔格式: 每行一个 cookie
+            for line in "${cookie_lines[@]}"; do
+                out="${out:+$out&}$line"
+            done
+        fi
+        ENV_VARS["GLADOS_COOKIES"]="$out"
     fi
 }
 
+
 save_env_file() {
     local order=("GLADOS_COOKIES" "GLADOS_EXCHANGE_PLAN" "PUSHDEER_SENDKEY" "SERVERCHAN_SENDKEY" "GLADOS_VERBOSE")
-    local k v part
+    local k v part pretty
     {
         echo "# GLaDOS 本地配置 (由 run-local.sh 生成, 已被 .gitignore 忽略, 请勿提交)"
         echo "# 修改后保存即可, 再次运行 ./run-local.sh 自动生效"
-        echo "# GLADOS_COOKIES 支持多行: 下一行起每行一个 cookie (或单行用 & 连接均可)"
+        echo "# GLADOS_COOKIES 支持 JSON 数组 (可多行缩进); 旧 & 分隔格式仍兼容"
         echo ""
         for k in "${order[@]}"; do
             v="${ENV_VARS[$k]:-}"
-            # JSON 数组格式保持单行, 不拆分; 旧 & 分隔格式每行一个 cookie
-            if [ "$k" = "GLADOS_COOKIES" ] && [ -n "$v" ] && [ "${v:0:1}" != "[" ] && [ "${v:0:1}" != "{" ]; then
+            if [ "$k" = "GLADOS_COOKIES" ] && [ -n "$v" ] && { [ "${v:0:1}" = "[" ] || [ "${v:0:1}" = "{" ]; }; then
+                # JSON: 用 python 美化为多行缩进; 失败则原样单行
+                pretty=$(printf '%s' "$v" | "$PYTHON_CMD" -m json.tool 2>/dev/null)
+                if [ -n "$pretty" ]; then
+                    printf 'GLADOS_COOKIES=%s\n' "$(printf '%s' "$pretty" | head -n1)"
+                    printf '%s\n' "$pretty" | tail -n +2
+                else
+                    echo "GLADOS_COOKIES=$v"
+                fi
+            elif [ "$k" = "GLADOS_COOKIES" ] && [ -n "$v" ]; then
+                # 旧 & 分隔格式: 每行一个 cookie
                 echo "GLADOS_COOKIES="
                 local old_ifs="$IFS"
                 IFS='&'
